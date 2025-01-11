@@ -23,40 +23,49 @@ def extract_invoice_data(pdf_text):
 
         for i in range(len(invoice_numbers)):
             data.append({
-                "Page Number": page_number,
-                "Invoice Number": invoice_numbers[i] if i < len(invoice_numbers) else None,
-                "Invoice Date": invoice_dates[0] if invoice_dates else None,
-                "Starting Point": starting_points[i] if i < len(starting_points) else None,
+                "Numéro de page": page_number,
+                "Numéro de facture": invoice_numbers[i] if i < len(invoice_numbers) else None,
+                "Date de la facture": invoice_dates[0] if invoice_dates else None,
+                "Point de départ": starting_points[i] if i < len(starting_points) else None,
                 "Destination": destinations[i] if i < len(destinations) else None,
-                "Total Price": total_price
+                "Prix total": total_price
             })
     return pd.DataFrame(data)
 
-st.title("Invoice Processing App")
+# Set up the app title and description (in French)
+st.set_page_config(
+    page_title="Analyseur de PDF Askifea",
+    page_icon="📄",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# File uploader
-uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
+st.title("Analyseur de PDF Askifea")
+st.write("### Analysez les factures PDF (taxi, G7, ...).")
+
+# File uploader (in French)
+uploaded_file = st.file_uploader("Téléchargez un fichier PDF", type="pdf")
 
 if uploaded_file:
-    st.write("Processing your file...")
+    st.write("Traitement de votre fichier...")
     # Extract text from PDF
     pdf_text = extract_text(uploaded_file)
     
     # Process the text to extract invoice data
     invoice_data = extract_invoice_data(pdf_text)
 
-    # Display results
-    st.write("### Extracted Invoice Data")
+    # Display results (in French)
+    st.write("### Données des factures extraites")
     st.dataframe(invoice_data)
 
-    # Download the Excel file
-    output_path = "Extracted_Invoices.xlsx"
+    # Download the Excel file (in French)
+    output_path = "Factures_Extraites.xlsx"
     invoice_data.to_excel(output_path, index=False)
 
     with open(output_path, "rb") as file:
         st.download_button(
-            label="Download Excel File",
+            label="Télécharger le fichier Excel",
             data=file,
-            file_name="Extracted_Invoices.xlsx",
+            file_name="Factures_Extraites.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
