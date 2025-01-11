@@ -13,7 +13,13 @@ def extract_invoice_data(pdf_text):
         invoice_dates = re.findall(r"Clichy, le (\d{2}/\d{2}/\d{4})", page_text)
         starting_points = re.findall(r"Départ :\s*(.+)", page_text)
         destinations = re.findall(r"Arrivée :\s*(.+)", page_text)
-        total_prices = re.findall(r"([\d,.]+ €)", page_text)
+
+        # Extract the total price after "Solde restant à payer" and before the next "€"
+        total_price_matches = re.findall(r"Solde restant à payer\s*([\d,.]+)\s*€", page_text)
+        total_price = None
+        if total_price_matches:
+            # Take the first match, replace dots with commas
+            total_price = total_price_matches[0].replace('.', ',')
 
         for i in range(len(invoice_numbers)):
             data.append({
@@ -22,7 +28,7 @@ def extract_invoice_data(pdf_text):
                 "Invoice Date": invoice_dates[0] if invoice_dates else None,
                 "Starting Point": starting_points[i] if i < len(starting_points) else None,
                 "Destination": destinations[i] if i < len(destinations) else None,
-                "Total Price": total_prices[0] if total_prices else None
+                "Total Price": total_price
             })
     return pd.DataFrame(data)
 
