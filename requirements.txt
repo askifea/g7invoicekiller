@@ -3,3 +3,4 @@ pdfminer.six
 pandas
 openpyxl
 streamlit-aggrid
+PyPDF2
