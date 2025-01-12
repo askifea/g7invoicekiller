@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import re
 from pdfminer.high_level import extract_text
-from st_aggrid import AgGrid, GridOptionsBuilder
 
 # Function to extract invoice data
 def extract_invoice_data(pdf_text):
@@ -44,6 +43,8 @@ if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = {}
 if "combined_data" not in st.session_state:
     st.session_state.combined_data = pd.DataFrame()
+if "filters" not in st.session_state:
+    st.session_state.filters = {}
 
 # File uploader for multiple files
 uploaded_files = st.file_uploader("Téléchargez des fichiers PDF", type="pdf", accept_multiple_files=True)
@@ -58,6 +59,19 @@ if uploaded_files:
             st.session_state.combined_data = pd.concat(
                 [st.session_state.combined_data, invoice_data], ignore_index=True
             )
+
+# Dynamically update table and Résumé when files are removed
+uploaded_file_names = [file.name for file in uploaded_files] if uploaded_files else []
+files_to_keep = set(uploaded_file_names)
+files_to_remove = set(st.session_state.uploaded_files.keys()) - files_to_keep
+
+for file_name in files_to_remove:
+    st.session_state.combined_data = st.session_state.combined_data[
+        ~st.session_state.combined_data["Numéro de facture"].isin(
+            st.session_state.uploaded_files[file_name]["Numéro de facture"]
+        )
+    ]
+    del st.session_state.uploaded_files[file_name]
 
 # Display Résumé section
 if not st.session_state.combined_data.empty:
@@ -76,32 +90,60 @@ if not st.session_state.combined_data.empty:
     )
     st.table(total_data)
 
-# Display combined data as a filterable table
-st.markdown("#### Liste des factures analysées")
+# Add filtering for the table
 if not st.session_state.combined_data.empty:
-    # Build filterable AgGrid table
-    gb = GridOptionsBuilder.from_dataframe(st.session_state.combined_data)
-    gb.configure_pagination(paginationAutoPageSize=True)  # Enable pagination
-    gb.configure_default_column(editable=False, filter=True)  # Enable filtering
-    grid_options = gb.build()
+    st.markdown("#### Liste des factures analysées")
+    filtered_data = st.session_state.combined_data.copy()
 
-    # Display the table
-    AgGrid(
-        st.session_state.combined_data,
-        gridOptions=grid_options,
-        height=800,
-        theme="streamlit",
-    )
+    with st.expander("Filtres"):
+        col1, col2 = st.columns([1, 5])  # Narrow column for reset button
+        with col1:
+            # Reset filters button
+            reset_filters = st.button("Réinitialiser les filtres")
+        with col2:
+            # Display active filters indicator
+            if any(st.session_state.filters.values()):
+                st.write("**Filtres actifs**")
+            else:
+                st.write("Aucun filtre actif")
 
-# Save the combined data to Excel
-if not st.session_state.combined_data.empty:
+        # Reset all filters
+        if reset_filters:
+            st.session_state.filters = {}
+
+        # Apply filters
+        for column in filtered_data.columns:
+            if column == "Numéro de page":  # Numeric filter
+                min_value = st.number_input(
+                    f"Min {column}", value=float(filtered_data[column].min()), step=1.0, key=f"min_{column}"
+                )
+                max_value = st.number_input(
+                    f"Max {column}", value=float(filtered_data[column].max()), step=1.0, key=f"max_{column}"
+                )
+                st.session_state.filters[column] = (min_value, max_value)
+                filtered_data = filtered_data[
+                    (filtered_data[column] >= min_value) & (filtered_data[column] <= max_value)
+                ]
+            else:  # Multi-select filter
+                unique_values = filtered_data[column].dropna().unique().tolist()
+                selected_values = st.multiselect(
+                    f"Filtrer par {column}", options=unique_values, key=f"filter_{column}"
+                )
+                st.session_state.filters[column] = selected_values
+                if selected_values:
+                    filtered_data = filtered_data[filtered_data[column].isin(selected_values)]
+
+    # Display the filtered table
+    st.dataframe(filtered_data)
+
+    # Save the filtered data to Excel
     output_file = "Factures_Extraites_Multifichiers.xlsx"
-    st.session_state.combined_data.to_excel(output_file, index=False)
+    filtered_data.to_excel(output_file, index=False)
 
     # Provide a download link for the Excel file
     with open(output_file, "rb") as file:
         st.download_button(
-            label="Télécharger le fichier Excel combiné",
+            label="Télécharger le fichier Excel filtré",
             data=file,
             file_name="Factures_Extraites_Multifichiers.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
