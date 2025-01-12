@@ -3,6 +3,7 @@ import pandas as pd
 import re
 from pdfminer.high_level import extract_text
 
+# Function to extract invoice data
 def extract_invoice_data(pdf_text):
     pages = pdf_text.split('\x0c')  # Split text by pages
     data = []
@@ -18,7 +19,6 @@ def extract_invoice_data(pdf_text):
         total_price_matches = re.findall(r"Solde restant à payer\s*([\d,.]+)\s*€", page_text)
         total_price = None
         if total_price_matches:
-            # Take the first match, replace dots with commas
             total_price = total_price_matches[0].replace('.', ',')
 
         for i in range(len(invoice_numbers)):
@@ -32,40 +32,40 @@ def extract_invoice_data(pdf_text):
             })
     return pd.DataFrame(data)
 
-# Set up the app title and description (in French)
-st.set_page_config(
-    page_title="Analyseur de PDF Askifea",
-    page_icon="📄",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
+# Streamlit app
+st.set_page_config(page_title="Analyseur de PDF Askifea", page_icon="📄", layout="wide")
 st.title("Analyseur de PDF Askifea")
-st.write("### Analysez les factures PDF (taxi, G7, ...).")
+st.write("### Téléchargez plusieurs fichiers PDF pour les analyser")
 
-# File uploader (in French)
-uploaded_file = st.file_uploader("Téléchargez un fichier PDF", type="pdf")
+# File uploader for multiple files
+uploaded_files = st.file_uploader("Téléchargez des fichiers PDF", type="pdf", accept_multiple_files=True)
 
-if uploaded_file:
-    st.write("Traitement de votre fichier...")
-    # Extract text from PDF
-    pdf_text = extract_text(uploaded_file)
-    
-    # Process the text to extract invoice data
-    invoice_data = extract_invoice_data(pdf_text)
+if uploaded_files:
+    st.write("Traitement de vos fichiers...")
+    combined_data = pd.DataFrame()  # Initialize an empty DataFrame
 
-    # Display results (in French)
-    st.write("### Données des factures extraites")
-    st.dataframe(invoice_data)
+    # Process each file
+    for uploaded_file in uploaded_files:
+        # Extract text from the PDF
+        pdf_text = extract_text(uploaded_file)
+        # Process the PDF and extract data
+        invoice_data = extract_invoice_data(pdf_text)
+        # Append the data to the combined DataFrame
+        combined_data = pd.concat([combined_data, invoice_data], ignore_index=True)
 
-    # Download the Excel file (in French)
-    output_path = "Factures_Extraites.xlsx"
-    invoice_data.to_excel(output_path, index=False)
+    # Display combined data
+    st.write("### Données extraites")
+    st.dataframe(combined_data)
 
-    with open(output_path, "rb") as file:
+    # Save the combined data to Excel
+    output_file = "Factures_Extraites_Multifichiers.xlsx"
+    combined_data.to_excel(output_file, index=False)
+
+    # Provide a download link for the Excel file
+    with open(output_file, "rb") as file:
         st.download_button(
-            label="Télécharger le fichier Excel",
+            label="Télécharger le fichier Excel combiné",
             data=file,
-            file_name="Factures_Extraites.xlsx",
+            file_name="Factures_Extraites_Multifichiers.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
