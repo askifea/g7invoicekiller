@@ -1,132 +1,191 @@
 import streamlit as st
 import pandas as pd
 import re
-from PyPDF2 import PdfMerger
 from pdfminer.high_level import extract_text
-import io
+from dataclasses import dataclass
+from typing import List, Dict, Optional
+import logging
+from decimal import Decimal
 
-# Function to extract invoice data
-def extract_invoice_data(pdf_text):
-    pages = pdf_text.split('\x0c')  # Split text by pages
-    data = []
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-    for page_number, page_text in enumerate(pages, start=1):
-        # Extract fields using regex
-        invoice_numbers = re.findall(r"FACTURE N°\s*(\S+)", page_text)
-        invoice_dates = re.findall(r"Clichy, le (\d{2}/\d{2}/\d{4})", page_text)
-        starting_points = re.findall(r"Départ :\s*(.+)", page_text)
-        destinations = re.findall(r"Arrivée :\s*(.+)", page_text)
+@dataclass
+class InvoiceData:
+    page_number: int
+    invoice_number: Optional[str]
+    invoice_date: Optional[str]
+    departure_point: Optional[str]
+    destination: Optional[str]
+    total_price: Optional[str]
 
-        # Extract the total price after "Solde restant à payer" and before the next "€"
-        total_price_matches = re.findall(r"Solde restant à payer\s*([\d,.]+)\s*€", page_text)
-        total_price = None
-        if total_price_matches:
-            total_price = total_price_matches[0].replace('.', ',')
+class InvoiceProcessor:
+    def __init__(self):
+        self.price_pattern = r"Solde restant à payer\s*([\d,.]+)\s*€"
+        self.invoice_number_pattern = r"FACTURE N°\s*(\S+)"
+        self.date_pattern = r"Clichy, le (\d{2}/\d{2}/\d{4})"
+        self.departure_pattern = r"Départ :\s*(.+)"
+        self.destination_pattern = r"Arrivée :\s*(.+)"
 
-        for i in range(len(invoice_numbers)):
-            data.append({
-                "Numéro de page": page_number,
-                "Numéro de facture": invoice_numbers[i] if i < len(invoice_numbers) else None,
-                "Date de la facture": invoice_dates[0] if invoice_dates else None,
-                "Point de départ": starting_points[i] if i < len(starting_points) else None,
-                "Destination": destinations[i] if i < len(destinations) else None,
-                "Prix total": f"{total_price} €" if total_price else None
-            })
-    return pd.DataFrame(data)
+    def extract_field(self, pattern: str, text: str) -> List[str]:
+        return re.findall(pattern, text)
 
-# Streamlit app
-st.set_page_config(page_title="Analyseur de PDF Askifea", page_icon="📄", layout="wide")
-st.title("Analyseur de PDF Askifea")
+    def parse_price(self, price_str: str) -> Optional[Decimal]:
+        try:
+            if price_str:
+                # Remove currency symbol and spaces, replace comma with dot
+                cleaned_price = price_str.replace('€', '').replace(' ', '').replace(',', '.')
+                return Decimal(cleaned_price)
+            return None
+        except (ValueError, TypeError) as e:
+            logger.error(f"Error parsing price {price_str}: {e}")
+            return None
 
-st.markdown("### Téléchargez plusieurs fichiers PDF pour les analyser")
+    def process_page(self, page_text: str, page_number: int) -> List[InvoiceData]:
+        try:
+            invoice_numbers = self.extract_field(self.invoice_number_pattern, page_text)
+            invoice_dates = self.extract_field(self.date_pattern, page_text)
+            departure_points = self.extract_field(self.departure_pattern, page_text)
+            destinations = self.extract_field(self.destination_pattern, page_text)
+            total_prices = self.extract_field(self.price_pattern, page_text)
 
-# Initialize session state to store uploaded files and their data
-if "uploaded_files" not in st.session_state:
-    st.session_state.uploaded_files = {}
-if "extracted_data" not in st.session_state:
-    st.session_state.extracted_data = pd.DataFrame()
+            results = []
+            for i in range(len(invoice_numbers)):
+                invoice_data = InvoiceData(
+                    page_number=page_number,
+                    invoice_number=invoice_numbers[i] if i < len(invoice_numbers) else None,
+                    invoice_date=invoice_dates[0] if invoice_dates else None,
+                    departure_point=departure_points[i] if i < len(departure_points) else None,
+                    destination=destinations[i] if i < len(destinations) else None,
+                    total_price=f"{total_prices[0].replace('.', ',')} €" if total_prices else None
+                )
+                results.append(invoice_data)
+            return results
+        except Exception as e:
+            logger.error(f"Error processing page {page_number}: {e}")
+            return []
 
-# File uploader for multiple files
-uploaded_files = st.file_uploader("Téléchargez des fichiers PDF", type="pdf", accept_multiple_files=True)
+class StreamlitApp:
+    def __init__(self):
+        self.processor = InvoiceProcessor()
+        self.initialize_session_state()
+        self.setup_page_config()
 
-# Process newly uploaded files
-if uploaded_files:
-    for uploaded_file in uploaded_files:
-        if uploaded_file.name not in st.session_state.uploaded_files:
+    def initialize_session_state(self):
+        if "uploaded_files" not in st.session_state:
+            st.session_state.uploaded_files = {}
+        if "extracted_data" not in st.session_state:
+            st.session_state.extracted_data = pd.DataFrame()
+        if "should_rerun" not in st.session_state:
+            st.session_state.should_rerun = False
+
+    def setup_page_config(self):
+        st.set_page_config(
+            page_title="Analyseur de PDF Askifea",
+            page_icon="📄",
+            layout="wide"
+        )
+        st.title("Analyseur de PDF Askifea")
+        st.markdown("### Téléchargez plusieurs fichiers PDF pour les analyser")
+
+    def process_uploaded_file(self, uploaded_file) -> pd.DataFrame:
+        try:
             pdf_text = extract_text(uploaded_file)
-            invoice_data = extract_invoice_data(pdf_text)
-            st.session_state.uploaded_files[uploaded_file.name] = uploaded_file
-            st.session_state.extracted_data = pd.concat(
-                [st.session_state.extracted_data, invoice_data], ignore_index=True
-            )
+            pages = pdf_text.split('\x0c')
+            all_invoice_data = []
+            
+            for page_num, page_text in enumerate(pages, start=1):
+                page_data = self.processor.process_page(page_text, page_num)
+                all_invoice_data.extend(page_data)
 
-# Dynamically update table and Résumé when files are removed
-uploaded_file_names = [file.name for file in uploaded_files] if uploaded_files else []
-files_to_keep = set(uploaded_file_names)
-files_to_remove = set(st.session_state.uploaded_files.keys()) - files_to_keep
+            return pd.DataFrame([vars(invoice) for invoice in all_invoice_data])
+        except Exception as e:
+            logger.error(f"Error processing file {uploaded_file.name}: {e}")
+            st.error(f"Erreur lors du traitement du fichier {uploaded_file.name}")
+            return pd.DataFrame()
 
-for file_name in files_to_remove:
-    # Filter out rows associated with the removed file
-    file_data = extract_invoice_data(extract_text(st.session_state.uploaded_files[file_name]))
-    st.session_state.extracted_data = st.session_state.extracted_data[
-        ~st.session_state.extracted_data["Numéro de facture"].isin(file_data["Numéro de facture"])
-    ]
-    del st.session_state.uploaded_files[file_name]
+    def create_invoice_table(self, df: pd.DataFrame):
+        if df.empty:
+            return
 
-# Display Résumé section
-if not st.session_state.extracted_data.empty:
-    # Compute totals for "Résumé"
-    total_invoices = len(st.session_state.extracted_data["Numéro de facture"].dropna())
-    total_cost = st.session_state.extracted_data["Prix total"].str.replace(" €", "").str.replace(",", ".").astype(float).sum()
-
-    st.markdown("### Résumé")
-    total_data = pd.DataFrame(
-        {
-            "": [
-                f"Total factures: {total_invoices}",
-                f"Total coût: {total_cost:.2f} €",
-            ]
-        }
-    )
-    st.table(total_data)
-
-# Merge uploaded PDFs into a single file
-if st.session_state.uploaded_files:
-    st.markdown("### Fusionner les fichiers PDF téléversés")
-    if st.button("Fusionner et télécharger les fichiers PDF"):
-        merger = PdfMerger()
-        for file_name, uploaded_file in st.session_state.uploaded_files.items():
-            merger.append(uploaded_file)
+        st.markdown("#### Liste des factures analysées")
         
-        # Save the merged file to a BytesIO object
-        merged_pdf = io.BytesIO()
-        merger.write(merged_pdf)
-        merger.close()
-        merged_pdf.seek(0)
+        for index, row in df.iterrows():
+            cols = st.columns([1, 2, 2, 2, 2, 2, 1])
+            cols[0].write(row["page_number"])
+            cols[1].write(row["invoice_number"])
+            cols[2].write(row["invoice_date"])
+            cols[3].write(row["departure_point"])
+            cols[4].write(row["destination"])
+            cols[5].write(row["total_price"])
+            
+            if cols[6].button("🗑️", key=f"delete_{index}"):
+                self.delete_invoice(row["invoice_number"])
+                st.session_state.should_rerun = True
+                st.rerun()
 
-        # Provide a download button for the merged file
-        st.download_button(
-            label="Télécharger le PDF fusionné",
-            data=merged_pdf,
-            file_name="Fichiers_Fusionnes.pdf",
-            mime="application/pdf"
+    def calculate_summary(self, df: pd.DataFrame):
+        if df.empty:
+            return
+
+        total_invoices = len(df["invoice_number"].dropna())
+        total_cost = sum(
+            self.processor.parse_price(price) or Decimal('0')
+            for price in df["total_price"].dropna()
         )
 
-# Display combined data as a standard table
-st.markdown("#### Liste des factures analysées")
-if not st.session_state.extracted_data.empty:
-    st.dataframe(st.session_state.extracted_data)
+        st.markdown("### Résumé")
+        summary_data = pd.DataFrame({
+            "Statistiques": [
+                f"Nombre total de factures: {total_invoices}",
+                f"Montant total: {total_cost:.2f} €",
+            ]
+        })
+        st.table(summary_data)
 
-# Save the combined data to Excel
-if not st.session_state.extracted_data.empty:
-    output_file = "Factures_Extraites_Multifichiers.xlsx"
-    st.session_state.extracted_data.to_excel(output_file, index=False)
+    def delete_invoice(self, invoice_number: str):
+        st.session_state.extracted_data = st.session_state.extracted_data[
+            st.session_state.extracted_data["invoice_number"] != invoice_number
+        ]
+        # Remove from uploaded_files if present
+        for file_name, data in list(st.session_state.uploaded_files.items()):
+            if invoice_number in data["invoice_number"].values:
+                del st.session_state.uploaded_files[file_name]
 
-    # Provide a download link for the Excel file
-    with open(output_file, "rb") as file:
-        st.download_button(
-            label="Télécharger le fichier Excel filtré",
-            data=file,
-            file_name="Factures_Extraites_Multifichiers.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    def run(self):
+        uploaded_files = st.file_uploader(
+            "Téléchargez des fichiers PDF",
+            type="pdf",
+            accept_multiple_files=True
         )
+
+        if uploaded_files:
+            self.handle_uploaded_files(uploaded_files)
+            
+        if not st.session_state.extracted_data.empty:
+            self.create_invoice_table(st.session_state.extracted_data)
+            self.calculate_summary(st.session_state.extracted_data)
+
+    def handle_uploaded_files(self, uploaded_files):
+        current_files = {file.name for file in uploaded_files}
+        
+        # Remove files that are no longer present
+        files_to_remove = set(st.session_state.uploaded_files.keys()) - current_files
+        for file_name in files_to_remove:
+            del st.session_state.uploaded_files[file_name]
+        
+        # Process new files
+        for uploaded_file in uploaded_files:
+            if uploaded_file.name not in st.session_state.uploaded_files:
+                new_data = self.process_uploaded_file(uploaded_file)
+                if not new_data.empty:
+                    st.session_state.uploaded_files[uploaded_file.name] = new_data
+                    st.session_state.extracted_data = pd.concat(
+                        [st.session_state.extracted_data, new_data],
+                        ignore_index=True
+                    )
+
+if __name__ == "__main__":
+    app = StreamlitApp()
+    app.run()
