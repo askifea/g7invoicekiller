@@ -1,191 +1,243 @@
-import streamlit as st
+import solara
 import pandas as pd
 import re
 from pdfminer.high_level import extract_text
-from dataclasses import dataclass
-from typing import List, Dict, Optional
-import logging
-from decimal import Decimal
+from PyPDF2 import PdfMerger
+import io
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-@dataclass
-class InvoiceData:
-    page_number: int
-    invoice_number: Optional[str]
-    invoice_date: Optional[str]
-    departure_point: Optional[str]
-    destination: Optional[str]
-    total_price: Optional[str]
+@solara.component
+def InvoiceProcessor():
+    files, set_files = solara.use_state({})
+    extracted_data, set_extracted_data = solara.use_state(pd.DataFrame())
+    alerts, set_alerts = solara.use_state([])
+    filters, set_filters = solara.use_state({})
+    sort_column, set_sort_column = solara.use_state(None)
+    sort_ascending, set_sort_ascending = solara.use_state(True)
+    merged_pdf_data, set_merged_pdf_data = solara.use_state(None)
 
-class InvoiceProcessor:
-    def __init__(self):
-        self.price_pattern = r"Solde restant à payer\s*([\d,.]+)\s*€"
-        self.invoice_number_pattern = r"FACTURE N°\s*(\S+)"
-        self.date_pattern = r"Clichy, le (\d{2}/\d{2}/\d{4})"
-        self.departure_pattern = r"Départ :\s*(.+)"
-        self.destination_pattern = r"Arrivée :\s*(.+)"
+    def extract_invoice_data(pdf_text):
+        """Extract structured invoice data from PDF text."""
+        pages = pdf_text.split('\x0c')
+        data = []
 
-    def extract_field(self, pattern: str, text: str) -> List[str]:
-        return re.findall(pattern, text)
+        for page_number, page_text in enumerate(pages, start=1):
+            invoice_numbers = re.findall(r"FACTURE N°\s*(\S+)", page_text)
+            invoice_dates = re.findall(r"Clichy, le (\d{2}/\d{2}/\d{4})", page_text)
+            starting_points = re.findall(r"Départ :\s*(.+)", page_text)
+            destinations = re.findall(r"Arrivée :\s*(.+)", page_text)
+            total_price_matches = re.findall(r"Solde restant à payer\s*([\d,.]+)\s*€", page_text)
 
-    def parse_price(self, price_str: str) -> Optional[Decimal]:
-        try:
-            if price_str:
-                # Remove currency symbol and spaces, replace comma with dot
-                cleaned_price = price_str.replace('€', '').replace(' ', '').replace(',', '.')
-                return Decimal(cleaned_price)
-            return None
-        except (ValueError, TypeError) as e:
-            logger.error(f"Error parsing price {price_str}: {e}")
-            return None
+            total_price = None
+            if total_price_matches:
+                total_price = total_price_matches[0].replace('.', ',')
 
-    def process_page(self, page_text: str, page_number: int) -> List[InvoiceData]:
-        try:
-            invoice_numbers = self.extract_field(self.invoice_number_pattern, page_text)
-            invoice_dates = self.extract_field(self.date_pattern, page_text)
-            departure_points = self.extract_field(self.departure_pattern, page_text)
-            destinations = self.extract_field(self.destination_pattern, page_text)
-            total_prices = self.extract_field(self.price_pattern, page_text)
-
-            results = []
             for i in range(len(invoice_numbers)):
-                invoice_data = InvoiceData(
-                    page_number=page_number,
-                    invoice_number=invoice_numbers[i] if i < len(invoice_numbers) else None,
-                    invoice_date=invoice_dates[0] if invoice_dates else None,
-                    departure_point=departure_points[i] if i < len(departure_points) else None,
-                    destination=destinations[i] if i < len(destinations) else None,
-                    total_price=f"{total_prices[0].replace('.', ',')} €" if total_prices else None
+                data.append({
+                    "Page #": page_number,
+                    "Numéro de facture": invoice_numbers[i] if i < len(invoice_numbers) else None,
+                    "Date de la facture": invoice_dates[0] if invoice_dates else None,
+                    "Point de départ": starting_points[i] if i < len(starting_points) else None,
+                    "Destination": destinations[i] if i < len(destinations) else None,
+                    "Prix total": f"{total_price} €" if total_price else None,
+                })
+        return pd.DataFrame(data)
+
+    def handle_files(uploaded_files):
+        """Process uploaded files and extract invoice data."""
+        if not uploaded_files:
+            return
+
+        new_files = files.copy()
+        new_data = extracted_data.copy() if not extracted_data.empty else pd.DataFrame()
+        new_alerts = alerts.copy()
+
+        for file_data in uploaded_files:
+            filename = None
+            try:
+                filename = file_data["name"]
+                file_obj = file_data["file_obj"]
+                content = file_obj.read()
+
+                if not filename.lower().endswith('.pdf'):
+                    new_alerts.append(f"⚠️ {filename} is not a valid PDF. Skipping...")
+                    continue
+
+                new_files[filename] = content
+                pdf_text = extract_text(io.BytesIO(content))
+
+                if not pdf_text.strip():
+                    new_alerts.append(f"⚠️ {filename} is empty or unreadable. Skipping...")
+                    continue
+
+                invoice_data = extract_invoice_data(pdf_text)
+                new_data = pd.concat([new_data, invoice_data], ignore_index=True)
+
+            except Exception as e:
+                new_alerts.append(f"❌ Error processing {filename}: {e}" if filename else "❌ Error processing a file.")
+
+        set_files(new_files)
+        set_extracted_data(new_data)
+        set_alerts(new_alerts)
+
+    def delete_file_and_row(invoice_number):
+        """Delete a file and the corresponding row from the table."""
+        filename_to_delete = None
+        for filename, content in files.items():
+            pdf_text = extract_text(io.BytesIO(content))
+            if invoice_number in pdf_text:
+                filename_to_delete = filename
+                break
+
+        if filename_to_delete:
+            new_files = {name: content for name, content in files.items() if name != filename_to_delete}
+            set_files(new_files)
+
+            if "Numéro de facture" in extracted_data.columns:
+                new_data = extracted_data[extracted_data["Numéro de facture"] != invoice_number]
+                set_extracted_data(new_data)
+
+    def generate_merged_pdf():
+        """Merge all remaining files into a single PDF."""
+        if not files:
+            set_alerts(["⚠️ No files to merge."])
+            return
+
+        merger = PdfMerger()
+        for content in files.values():
+            merger.append(io.BytesIO(content))
+
+        # Generate merged PDF in memory
+        output_buffer = io.BytesIO()
+        merger.write(output_buffer)
+        merger.close()
+        output_buffer.seek(0)
+        set_merged_pdf_data(output_buffer.getvalue())
+
+    def apply_filters(data):
+        """Apply filters to the DataFrame."""
+        filtered_data = data
+        for column, value in filters.items():
+            if value:
+                filtered_data = filtered_data[filtered_data[column].astype(str).str.contains(value, case=False, na=False)]
+        return filtered_data
+
+    def apply_sort(data):
+        """Apply sorting to the DataFrame."""
+        if sort_column:
+            data = data.sort_values(by=sort_column, ascending=sort_ascending)
+        return data
+
+    # UI Layout
+    with solara.Column(align="center", style={"gap": "1rem"}):
+        # Title
+        solara.Markdown(
+            "**G7 INVOICE KILLER**",
+            style={"font-family": "Oswald, sans-serif", "font-weight": "bold", "font-size": "2rem", "text-align": "center"}
+        )
+        solara.Markdown(
+            "_v.01-2025_",
+            style={"font-family": "Oswald, sans-serif", "font-size": "1rem", "font-style": "italic", "text-align": "center"}
+        )
+
+        solara.Markdown("### Téléchargez vos fichiers PDF")
+        
+        solara.FileDropMultiple(
+            on_file=handle_files,
+            label="Glissez-déposez vos fichiers PDF ici"
+        )
+
+        if alerts:
+            for alert in alerts:
+                solara.Text(alert, style={"color": "red"})
+
+        # Summary Section (without "Résumé" title)
+        if not extracted_data.empty:
+            filtered_data = apply_filters(extracted_data)
+            sorted_data = apply_sort(filtered_data)
+
+            # Calculate summary
+            total_invoices = len(filtered_data)
+            total_cost = (
+                filtered_data["Prix total"]
+                .str.replace(" €", "", regex=False)
+                .str.replace(",", ".", regex=False)
+                .astype(float)
+                .sum()
+            )
+            solara.Text(
+                f"{total_invoices} factures listées, coût total: {total_cost:.2f} €",
+                style={
+                    "font-weight": "bold",
+                    "font-size": "1.5rem",
+                    "background-color": "#f0f0f0",
+                    "padding": "10px",
+                    "border-radius": "5px",
+                },
+            )
+
+            # Render Table Header
+            solara.Markdown("### Tableau avec Filtres et Tri")
+            with solara.Row(style={"font-weight": "bold", "border-bottom": "2px solid #ccc", "position": "sticky", "top": "0", "background-color": "white"}):  # Sticky headers
+                column_styles = {
+                    "Page #": {"min-width": "80px", "text-align": "left"},
+                    "Numéro de facture": {"min-width": "200px", "text-align": "left"},
+                    "Date de la facture": {"min-width": "120px", "text-align": "left"},
+                    "Point de départ": {"min-width": "250px", "text-align": "left"},
+                    "Destination": {"min-width": "250px", "text-align": "left"},
+                    "Prix total": {"min-width": "100px", "text-align": "left"},
+                }
+                for column in extracted_data.columns:
+                    col_style = column_styles.get(column, {"flex": "1", "text-align": "left", "min-width": "150px"})
+                    with solara.Column(style=col_style):
+                        solara.Button(
+                            f"{column} {'↓' if sort_column == column and sort_ascending else '↑'}",
+                            on_click=lambda c=column: [
+                                set_sort_column(c),
+                                set_sort_ascending(not sort_ascending) if sort_column == c else set_sort_ascending(True)
+                            ]
+                        )
+                        solara.InputText(
+                            value=filters.get(column, ""),
+                            on_value=lambda v, c=column: set_filters({**filters, c: v}),
+                            label=None  # Removed filter labels
+                        )
+
+                # Add "Actions" column for the Supprimer button
+                with solara.Column(style={"flex": "1", "text-align": "center", "min-width": "120px"}):
+                    solara.Text("Actions")
+
+            # Render Rows
+            for _, row in sorted_data.iterrows():
+                with solara.Row(style={"border-bottom": "1px solid #ddd", "padding": "0.5rem"}):
+                    for col_value, column in zip(row, sorted_data.columns):
+                        col_style = column_styles.get(column, {"flex": "1", "text-align": "left", "min-width": "150px"})
+                        solara.Text(str(col_value), style=col_style)
+
+                    # Render "Supprimer" button in the last column
+                    with solara.Column(style={"flex": "1", "text-align": "center", "min-width": "120px"}):
+                        solara.Button(
+                            "Supprimer",
+                            on_click=lambda invoice=row["Numéro de facture"]: delete_file_and_row(invoice),
+                            style={"background-color": "#ff4d4f", "color": "white"}
+                        )
+
+        # Add Export Button (sticky at the bottom)
+        with solara.Row(style={"position": "sticky", "bottom": "0", "background-color": "white", "padding": "10px", "z-index": "10"}):
+            if files:
+                solara.Button(
+                    "Générer un PDF fusionné",
+                    on_click=generate_merged_pdf,
+                    style={"background-color": "#007bff", "color": "white", "margin": "10px"}
                 )
-                results.append(invoice_data)
-            return results
-        except Exception as e:
-            logger.error(f"Error processing page {page_number}: {e}")
-            return []
-
-class StreamlitApp:
-    def __init__(self):
-        self.processor = InvoiceProcessor()
-        self.initialize_session_state()
-        self.setup_page_config()
-
-    def initialize_session_state(self):
-        if "uploaded_files" not in st.session_state:
-            st.session_state.uploaded_files = {}
-        if "extracted_data" not in st.session_state:
-            st.session_state.extracted_data = pd.DataFrame()
-        if "should_rerun" not in st.session_state:
-            st.session_state.should_rerun = False
-
-    def setup_page_config(self):
-        st.set_page_config(
-            page_title="Analyseur de PDF Askifea",
-            page_icon="📄",
-            layout="wide"
-        )
-        st.title("Analyseur de PDF Askifea")
-        st.markdown("### Téléchargez plusieurs fichiers PDF pour les analyser")
-
-    def process_uploaded_file(self, uploaded_file) -> pd.DataFrame:
-        try:
-            pdf_text = extract_text(uploaded_file)
-            pages = pdf_text.split('\x0c')
-            all_invoice_data = []
-            
-            for page_num, page_text in enumerate(pages, start=1):
-                page_data = self.processor.process_page(page_text, page_num)
-                all_invoice_data.extend(page_data)
-
-            return pd.DataFrame([vars(invoice) for invoice in all_invoice_data])
-        except Exception as e:
-            logger.error(f"Error processing file {uploaded_file.name}: {e}")
-            st.error(f"Erreur lors du traitement du fichier {uploaded_file.name}")
-            return pd.DataFrame()
-
-    def create_invoice_table(self, df: pd.DataFrame):
-        if df.empty:
-            return
-
-        st.markdown("#### Liste des factures analysées")
-        
-        for index, row in df.iterrows():
-            cols = st.columns([1, 2, 2, 2, 2, 2, 1])
-            cols[0].write(row["page_number"])
-            cols[1].write(row["invoice_number"])
-            cols[2].write(row["invoice_date"])
-            cols[3].write(row["departure_point"])
-            cols[4].write(row["destination"])
-            cols[5].write(row["total_price"])
-            
-            if cols[6].button("🗑️", key=f"delete_{index}"):
-                self.delete_invoice(row["invoice_number"])
-                st.session_state.should_rerun = True
-                st.rerun()
-
-    def calculate_summary(self, df: pd.DataFrame):
-        if df.empty:
-            return
-
-        total_invoices = len(df["invoice_number"].dropna())
-        total_cost = sum(
-            self.processor.parse_price(price) or Decimal('0')
-            for price in df["total_price"].dropna()
-        )
-
-        st.markdown("### Résumé")
-        summary_data = pd.DataFrame({
-            "Statistiques": [
-                f"Nombre total de factures: {total_invoices}",
-                f"Montant total: {total_cost:.2f} €",
-            ]
-        })
-        st.table(summary_data)
-
-    def delete_invoice(self, invoice_number: str):
-        st.session_state.extracted_data = st.session_state.extracted_data[
-            st.session_state.extracted_data["invoice_number"] != invoice_number
-        ]
-        # Remove from uploaded_files if present
-        for file_name, data in list(st.session_state.uploaded_files.items()):
-            if invoice_number in data["invoice_number"].values:
-                del st.session_state.uploaded_files[file_name]
-
-    def run(self):
-        uploaded_files = st.file_uploader(
-            "Téléchargez des fichiers PDF",
-            type="pdf",
-            accept_multiple_files=True
-        )
-
-        if uploaded_files:
-            self.handle_uploaded_files(uploaded_files)
-            
-        if not st.session_state.extracted_data.empty:
-            self.create_invoice_table(st.session_state.extracted_data)
-            self.calculate_summary(st.session_state.extracted_data)
-
-    def handle_uploaded_files(self, uploaded_files):
-        current_files = {file.name for file in uploaded_files}
-        
-        # Remove files that are no longer present
-        files_to_remove = set(st.session_state.uploaded_files.keys()) - current_files
-        for file_name in files_to_remove:
-            del st.session_state.uploaded_files[file_name]
-        
-        # Process new files
-        for uploaded_file in uploaded_files:
-            if uploaded_file.name not in st.session_state.uploaded_files:
-                new_data = self.process_uploaded_file(uploaded_file)
-                if not new_data.empty:
-                    st.session_state.uploaded_files[uploaded_file.name] = new_data
-                    st.session_state.extracted_data = pd.concat(
-                        [st.session_state.extracted_data, new_data],
-                        ignore_index=True
+                if merged_pdf_data:
+                    solara.FileDownload(
+                        filename="Fichiers_Fusionnes.pdf",
+                        data=merged_pdf_data,
+                        label="Télécharger le PDF fusionné"
                     )
 
-if __name__ == "__main__":
-    app = StreamlitApp()
-    app.run()
+
+@solara.component
+def Page():
+    return InvoiceProcessor()
