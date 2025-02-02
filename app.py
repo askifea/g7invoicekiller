@@ -36,10 +36,10 @@ def extract_invoice_data(pdf_text, filename):
     return pd.DataFrame(data)
 
 # Streamlit app
-st.set_page_config(page_title="Analyseur de PDF Askifea", page_icon="📄", layout="wide")
-st.title("Analyseur de PDF Askifea")
+st.set_page_config(page_title="Analyseur de factures G7 - Askifea", page_icon="📄", layout="wide")
+st.title("Analyseur de factures G7 - Askifea")
 
-st.markdown("### Téléchargez plusieurs fichiers PDF pour les analyser")
+st.markdown("### Téléchargez une ou plusieures factures G7 en PDF pour les analyser, peu importe le nombre de pages par facture")
 
 # Initialize session state to store uploaded files and their data
 if "uploaded_files" not in st.session_state:
