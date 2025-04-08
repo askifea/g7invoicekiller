@@ -1,132 +1,160 @@
 import streamlit as st
-import pandas as pd
 import re
-from PyPDF2 import PdfMerger
+from PyPDF2 import PdfReader, PdfWriter
 from pdfminer.high_level import extract_text
 import io
+import pandas as pd
 
-# Function to extract invoice data
-def extract_invoice_data(pdf_text, filename):
-    pages = pdf_text.split('\x0c')  # Split text by pages
-    data = []
+st.set_page_config(page_title="Renommer & Fusionner les Factures G7", page_icon="📄", layout="wide")
+st.title("📑 Séparer, Renommer et Fusionner les Factures G7")
 
-    for page_number, page_text in enumerate(pages, start=1):
-        # Extract fields using regex
-        invoice_numbers = re.findall(r"FACTURE N°\s*(\S+)", page_text)
-        invoice_dates = re.findall(r"Clichy, le (\d{2}/\d{2}/\d{4})", page_text)
-        starting_points = re.findall(r"Départ :\s*(.+)", page_text)
-        destinations = re.findall(r"Arrivée :\s*(.+)", page_text)
+# ---------- Extraction Function ----------
+def extract_invoice_data(text, filename):
+    pages = text.split('\x0c')
+    results = []
 
-        # Extract the total price after "Solde restant à payer" and before the next "€"
-        total_price_matches = re.findall(r"Solde restant à payer\s*([\d,.]+)\s*€", page_text)
-        total_price = None
-        if total_price_matches:
-            total_price = total_price_matches[0].replace('.', ',')
+    for idx, page in enumerate(pages):
+        date_match = re.search(r"Clichy,\s*le\s*(\d{2}/\d{2}/\d{4})", page)
+        depart_match = re.search(r"Départ\s*:\s*(.*)", page)
+        arrivee_match = re.search(r"Arrivée\s*:\s*(.*)", page)
 
-        for i in range(len(invoice_numbers)):
-            data.append({
-                "Numéro de page": page_number,
-                "Numéro de facture": invoice_numbers[i] if i < len(invoice_numbers) else None,
-                "Date de la facture": invoice_dates[0] if invoice_dates else None,
-                "Point de départ": starting_points[i] if i < len(starting_points) else None,
-                "Destination": destinations[i] if i < len(destinations) else None,
-                "Prix total": f"{total_price} €" if total_price else None,
-                "File Name": filename  # Add File Name column
+        # Extraction fiable du prix
+        prix = "-"
+        for line in page.splitlines():
+            if "Montant" in line and "€" in line:
+                match = re.findall(r"([\d\s,.]+)\s*€", line)
+                if match:
+                    raw = match[-1].strip().replace(" ", "").replace(",", ".")
+                    prix = f"{raw} €"
+                    break
+
+        if date_match or depart_match or arrivee_match:
+            if date_match:
+                raw_date = date_match.group(1)
+                date_display = raw_date
+                date_filename = raw_date.replace("/", "_")
+            else:
+                date_display = "-"
+                date_filename = "date"
+
+            depart_raw = depart_match.group(1).strip() if depart_match else "depart"
+            arrivee_raw = arrivee_match.group(1).strip() if arrivee_match else "arrivee"
+            depart = re.sub(r"[^\w]", "_", depart_raw)
+            arrivee = re.sub(r"[^\w]", "_", arrivee_raw)
+
+            filename_clean = f"{date_filename}_{depart}_{arrivee}.pdf"
+
+            results.append({
+                "page": idx,
+                "Date de la facture": date_display,
+                "Point de départ": depart_raw,
+                "Destination": arrivee_raw,
+                "Prix total": prix,
+                "Nom du fichier": filename_clean
             })
-    return pd.DataFrame(data)
 
-# Streamlit app
-st.set_page_config(page_title="Analyseur de factures G7 - Askifea", page_icon="📄", layout="wide")
-st.title("Analyseur de factures G7 - Askifea")
+    return results
 
-st.markdown("### Téléchargez une ou plusieures factures G7 en PDF pour les analyser, peu importe le nombre de pages par facture")
+# ---------- Upload ----------
+uploaded_files = st.file_uploader("📎 Uploadez un ou plusieurs fichiers PDF", type="pdf", accept_multiple_files=True)
 
-# Initialize session state to store uploaded files and their data
-if "uploaded_files" not in st.session_state:
-    st.session_state.uploaded_files = {}
-if "extracted_data" not in st.session_state:
-    st.session_state.extracted_data = pd.DataFrame()
+renamed_files = []
 
-# File uploader for multiple files
-uploaded_files = st.file_uploader("Téléchargez des fichiers PDF", type="pdf", accept_multiple_files=True)
-
-# Process newly uploaded files
 if uploaded_files:
     for uploaded_file in uploaded_files:
-        if uploaded_file.name not in st.session_state.uploaded_files:
-            pdf_text = extract_text(uploaded_file)
-            invoice_data = extract_invoice_data(pdf_text, uploaded_file.name)  # Pass file name
-            st.session_state.uploaded_files[uploaded_file.name] = uploaded_file
-            st.session_state.extracted_data = pd.concat(
-                [st.session_state.extracted_data, invoice_data], ignore_index=True
-            )
+        file_bytes = uploaded_file.read()
+        file_io = io.BytesIO(file_bytes)
 
-# Dynamically update table and Résumé when files are removed
-uploaded_file_names = [file.name for file in uploaded_files] if uploaded_files else []
-files_to_keep = set(uploaded_file_names)
-files_to_remove = set(st.session_state.uploaded_files.keys()) - files_to_keep
+        text = extract_text(io.BytesIO(file_bytes))
+        metadata = extract_invoice_data(text, uploaded_file.name)
 
-for file_name in files_to_remove:
-    # Filter out rows associated with the removed file
-    st.session_state.extracted_data = st.session_state.extracted_data[
-        st.session_state.extracted_data["File Name"] != file_name
+        reader = PdfReader(file_io)
+        if not metadata:
+            st.warning(f"❗️Aucune facture détectée dans {uploaded_file.name}")
+        else:
+            for meta in metadata:
+                writer = PdfWriter()
+                writer.add_page(reader.pages[meta["page"]])
+
+                output = io.BytesIO()
+                writer.write(output)
+                output.seek(0)
+
+                renamed_files.append((meta, output))
+
+# ---------- Selection Area + Output ----------
+if renamed_files:
+    st.markdown("### ✅ Sélectionnez les factures à fusionner")
+    selected_items = []
+
+    # 🔽 Tri et filtre
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        sort_by_destination = st.checkbox("Trier par destination")
+    with col2:
+        destination_filter = st.text_input("🔎 Filtrer par destination", "")
+
+    # Appliquer filtre et tri
+    filtered_files = [
+        (meta, buffer) for meta, buffer in renamed_files
+        if destination_filter.lower() in meta["Destination"].lower()
     ]
-    del st.session_state.uploaded_files[file_name]
+    sorted_files = sorted(filtered_files, key=lambda x: x[0]["Destination"]) if sort_by_destination else filtered_files
 
-# Display Résumé section
-if not st.session_state.extracted_data.empty:
-    # Compute totals for "Résumé"
-    total_invoices = len(st.session_state.extracted_data["Numéro de facture"].dropna())
-    total_cost = st.session_state.extracted_data["Prix total"].str.replace(" €", "").str.replace(",", ".").astype(float).sum()
+    for idx, (meta, buffer) in enumerate(sorted_files):
+        label = (
+            f"**{meta['Date de la facture']}** | "
+            f"{meta['Point de départ']} → {meta['Destination']} | "
+            f"{meta['Prix total']}"
+        )
+        if st.checkbox(label, key=f"select_{idx}"):
+            selected_items.append((meta, buffer))
 
-    st.markdown("### Résumé")
-    total_data = pd.DataFrame(
-        {
-            "": [
-                f"Total factures: {total_invoices}",
-                f"Total coût: {total_cost:.2f} €",
-            ]
-        }
-    )
-    st.table(total_data)
+    # ---------- Table of Selected Invoices ----------
+    if selected_items:
+        st.markdown("### 📊 Aperçu des factures sélectionnées")
 
-# Merge uploaded PDFs into a single file
-if st.session_state.uploaded_files:
-    st.markdown("### Fusionner les fichiers PDF téléversés")
-    if st.button("Fusionner et télécharger les fichiers PDF"):
-        merger = PdfMerger()
-        for file_name, uploaded_file in st.session_state.uploaded_files.items():
-            merger.append(uploaded_file)
-        
-        # Save the merged file to a BytesIO object
-        merged_pdf = io.BytesIO()
-        merger.write(merged_pdf)
-        merger.close()
-        merged_pdf.seek(0)
+        selected_meta = [meta for meta, _ in selected_items]
+        df_selected = pd.DataFrame(selected_meta).drop(columns=["Nom du fichier"])
 
-        # Provide a download button for the merged file
+        st.dataframe(df_selected, use_container_width=True)
+
+        # ---------- Show Total Price ----------
+        try:
+            total = df_selected["Prix total"].str.replace(" €", "").str.replace(",", ".").astype(float).sum()
+            st.success(f"💰 Total sélectionné : {total:.2f} €")
+        except Exception:
+            st.warning("❗️ Impossible de calculer le total.")
+
+        # ---------- Excel Export ----------
+        excel_output = io.BytesIO()
+        df_selected.to_excel(excel_output, index=False)
+        excel_output.seek(0)
+
         st.download_button(
-            label="Télécharger le PDF fusionné",
-            data=merged_pdf,
-            file_name="Fichiers_Fusionnes.pdf",
+            label="📊 Télécharger tableau Excel",
+            data=excel_output,
+            file_name="Factures_Selectionnees.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        # ---------- Merge PDF & Download ----------
+        merger = PdfWriter()
+        for _, buf in selected_items:
+            buf.seek(0)
+            merger.append(buf)
+
+        merged_output = io.BytesIO()
+        merger.write(merged_output)
+        merger.close()
+        merged_output.seek(0)
+
+        st.markdown("### 📥 Télécharger la sélection fusionnée")
+        st.download_button(
+            label="📎 Télécharger PDF fusionné",
+            data=merged_output,
+            file_name="Factures_Renommees_Merge.pdf",
             mime="application/pdf"
         )
-
-# Display combined data as a standard table
-st.markdown("#### Liste des factures analysées")
-if not st.session_state.extracted_data.empty:
-    st.dataframe(st.session_state.extracted_data)
-
-# Save the combined data to Excel
-if not st.session_state.extracted_data.empty:
-    output_file = "Factures_Extraites_Multifichiers.xlsx"
-    st.session_state.extracted_data.to_excel(output_file, index=False)
-
-    # Provide a download link for the Excel file
-    with open(output_file, "rb") as file:
-        st.download_button(
-            label="Télécharger le fichier Excel filtré",
-            data=file,
-            file_name="Factures_Extraites_Multifichiers.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+    else:
+        st.info("🔘 Cochez les factures à fusionner.")
